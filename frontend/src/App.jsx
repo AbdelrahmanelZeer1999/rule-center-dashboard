@@ -7,7 +7,7 @@ import {
   CheckCircle2, Activity, Terminal, FileJson, BookOpen, Trash2,
   Upload, Plus, AlertCircle, ChevronRight, Search, Wifi, WifiOff,
   Sun, Moon, ArrowLeft, BellRing, BrainCircuit, Workflow,
-  CalendarClock, Boxes, ClipboardCheck, Server, Code2, Bot, Gauge,
+  CalendarClock, Boxes, ClipboardCheck, Server, Code2, Bot, Gauge, Layers,
 } from 'lucide-react';
 
 // ─── Supabase connection ────────────────────────────────────────
@@ -135,6 +135,31 @@ const TEST_TYPES = [
   { id: 'automation',    name: 'Automation Test',   icon: Bot,            color: '#a855f7' },
   { id: 'performance',   name: 'Performance Test',  icon: Gauge,          color: '#f97316' },
 ];
+
+// ─── Product definitions ────────────────────────────────────────
+// A "product" is a top-level grouping. UFM contains 5 modules.
+// Rule Center is a standalone product (single module).
+const PRODUCTS = [
+  {
+    id: 'ufm',
+    name: 'UFM',
+    icon: Layers,
+    color: '#6366f1',
+    standalone: false,
+    moduleIds: ['alarm_viewer', 'faultmetric_engine', 'op_commander', 'rule_designer', 'scheduler'],
+  },
+  {
+    id: 'rule_center',
+    name: 'Rule Center',
+    icon: Boxes,
+    color: '#8b5cf6',
+    standalone: true,            // clicking this skips the modules level
+    moduleIds: ['rule_center'],
+  },
+];
+
+const findProduct = (id) => PRODUCTS.find(p => p.id === id);
+const findProductForModule = (moduleId) => PRODUCTS.find(p => p.moduleIds.includes(moduleId));
 
 const findModule = (id) => MODULES.find(m => m.id === id);
 const findTestType = (id) => TEST_TYPES.find(t => t.id === id);
@@ -314,6 +339,9 @@ export default function App() {
     try { return localStorage.getItem('rc-theme') || 'light'; } catch (e) { return 'light'; }
   });
 
+  const [selectedProduct, setSelectedProduct] = useState(() => {
+    return new URLSearchParams(window.location.search).get('product');
+  });
   const [selectedModule, setSelectedModule] = useState(() => {
     return new URLSearchParams(window.location.search).get('module');
   });
@@ -324,6 +352,7 @@ export default function App() {
   useEffect(() => {
     const onPopState = () => {
       const params = new URLSearchParams(window.location.search);
+      setSelectedProduct(params.get('product'));
       setSelectedModule(params.get('module'));
       setSelectedType(params.get('type'));
     };
@@ -331,26 +360,52 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
-  const updateUrl = ({ module, type }) => {
+  const updateUrl = ({ product, module, type }) => {
     const url = new URL(window.location);
+    if (product) url.searchParams.set('product', product); else url.searchParams.delete('product');
     if (module) url.searchParams.set('module', module); else url.searchParams.delete('module');
     if (type) url.searchParams.set('type', type); else url.searchParams.delete('type');
     window.history.pushState({}, '', url);
   };
 
   const goHome = () => {
-    updateUrl({});
+    setSelectedProduct(null);
     setSelectedModule(null);
     setSelectedType(null);
+    updateUrl({});
   };
-  const goToModule = (m) => {
-    updateUrl({ module: m });
-    setSelectedModule(m);
+  const goToProduct = (productId) => {
+    const product = findProduct(productId);
+    if (product?.standalone) {
+      // Skip the modules level — go directly to test types
+      setSelectedProduct(productId);
+      setSelectedModule(product.moduleIds[0]);
+      setSelectedType(null);
+      updateUrl({ product: productId, module: product.moduleIds[0] });
+    } else {
+      setSelectedProduct(productId);
+      setSelectedModule(null);
+      setSelectedType(null);
+      updateUrl({ product: productId });
+    }
+  };
+  const goToModule = (moduleId) => {
+    setSelectedModule(moduleId);
     setSelectedType(null);
+    updateUrl({ product: selectedProduct, module: moduleId });
   };
-  const goToType = (t) => {
-    updateUrl({ module: selectedModule, type: t });
-    setSelectedType(t);
+  const goToType = (typeId) => {
+    setSelectedType(typeId);
+    updateUrl({ product: selectedProduct, module: selectedModule, type: typeId });
+  };
+  const goBackToModules = () => {
+    setSelectedModule(null);
+    setSelectedType(null);
+    updateUrl({ product: selectedProduct });
+  };
+  const goBackToTypes = () => {
+    setSelectedType(null);
+    updateUrl({ product: selectedProduct, module: selectedModule });
   };
 
   // Theme
@@ -373,6 +428,11 @@ export default function App() {
         data = await api.list({ module: selectedModule, testType: selectedType });
       } else if (selectedModule) {
         data = await api.list({ module: selectedModule });
+      } else if (selectedProduct) {
+        // Fetch all modules under this product
+        const product = findProduct(selectedProduct);
+        data = await api.list();
+        data = data.filter(r => product?.moduleIds.includes(r.module));
       } else {
         data = await api.list();
       }
@@ -383,7 +443,7 @@ export default function App() {
       setConnected(false);
       setGlobalError(`Cannot connect to Supabase — ${e.message}`);
     }
-  }, [selectedModule, selectedType]);
+  }, [selectedProduct, selectedModule, selectedType]);
 
   useEffect(() => {
     refresh();
@@ -391,6 +451,7 @@ export default function App() {
     return () => clearInterval(interval);
   }, [refresh]);
 
+  const productObj = selectedProduct ? findProduct(selectedProduct) : null;
   const moduleObj = selectedModule ? findModule(selectedModule) : null;
   const typeObj = selectedType ? findTestType(selectedType) : null;
 
@@ -403,10 +464,12 @@ export default function App() {
         theme={theme}
         toggleTheme={toggleTheme}
         connected={connected}
+        productObj={productObj}
         moduleObj={moduleObj}
         typeObj={typeObj}
         onGoHome={goHome}
-        onGoModule={() => { updateUrl({ module: selectedModule }); setSelectedType(null); }}
+        onGoProduct={() => { setSelectedModule(null); setSelectedType(null); updateUrl({ product: selectedProduct }); }}
+        onGoModule={goBackToTypes}
       />
 
       {globalError && (
@@ -425,8 +488,10 @@ export default function App() {
           <div className="text-center py-20 font-mono text-sm" style={{ color: 'var(--text-muted)' }}>
             connecting to Supabase...
           </div>
+        ) : !selectedProduct ? (
+          <ProductsLanding onSelect={goToProduct} />
         ) : !selectedModule ? (
-          <ModulesLanding runs={runs} onSelect={goToModule} />
+          <ModulesLanding productObj={productObj} runs={runs} onSelect={goToModule} />
         ) : !selectedType ? (
           <TypesLanding moduleObj={moduleObj} runs={runs} onSelect={goToType} />
         ) : (
@@ -443,8 +508,8 @@ export default function App() {
       <footer className="mt-12 py-6 border-t" style={{ borderColor: 'var(--border)' }}>
         <div className="max-w-7xl mx-auto px-6 flex items-center justify-between text-[10px] font-mono tracking-wider"
           style={{ color: 'var(--text-faint)' }}>
-          <span>RULE_CENTER © {new Date().getFullYear()}</span>
-          <span>v0.4.0 • powered by Supabase</span>
+          <span>KATANA_TESTING © {new Date().getFullYear()}</span>
+          <span>v0.5.0 • powered by Supabase</span>
         </div>
       </footer>
     </div>
@@ -452,30 +517,53 @@ export default function App() {
 }
 
 // ─── Header with breadcrumb ─────────────────────────────────────
-function Header({ theme, toggleTheme, connected, moduleObj, typeObj, onGoHome, onGoModule }) {
+function Header({ theme, toggleTheme, connected, productObj, moduleObj, typeObj, onGoHome, onGoProduct, onGoModule }) {
+  // For standalone products (e.g. Rule Center), the product == module so we don't show them both
+  const isStandalone = productObj?.standalone;
+
+  // Determine back button target
+  const backHandler = typeObj
+    ? onGoModule                    // dashboard → types
+    : moduleObj && !isStandalone
+      ? onGoProduct                 // types → product modules
+      : onGoHome;                   // anything else → home
+
   return (
     <header className="sticky top-0 z-20 border-b backdrop-blur" style={{
       borderColor: 'var(--border)',
       background: theme === 'light' ? 'rgba(250, 250, 249, 0.85)' : 'rgba(10, 10, 10, 0.8)',
     }}>
       <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-2">
             <div className="w-2 h-2" style={{ background: 'var(--accent)', boxShadow: `0 0 8px var(--accent)` }} />
             <button onClick={onGoHome} className="font-mono text-sm tracking-[0.2em] hover:underline"
               style={{ color: 'var(--text-primary)' }}>
-              RULE_CENTER
+              KATANA_TESTING
             </button>
           </div>
 
-          {!moduleObj && (
+          {!productObj && (
             <>
               <span style={{ color: 'var(--text-faint)' }}>/</span>
-              <span className="font-mono text-xs tracking-wider" style={{ color: 'var(--text-muted)' }}>modules</span>
+              <span className="font-mono text-xs tracking-wider" style={{ color: 'var(--text-muted)' }}>products</span>
             </>
           )}
 
-          {moduleObj && (
+          {productObj && (
+            <>
+              <span style={{ color: 'var(--text-faint)' }}>/</span>
+              <button
+                onClick={onGoProduct}
+                className="font-mono text-xs tracking-wider uppercase hover:underline"
+                style={{ color: (moduleObj || typeObj) ? 'var(--text-muted)' : productObj.color }}
+              >
+                {productObj.name}
+              </button>
+            </>
+          )}
+
+          {moduleObj && !isStandalone && (
             <>
               <span style={{ color: 'var(--text-faint)' }}>/</span>
               <button
@@ -499,10 +587,10 @@ function Header({ theme, toggleTheme, connected, moduleObj, typeObj, onGoHome, o
         </div>
 
         <div className="flex items-center gap-3 text-[10px] font-mono tracking-wider" style={{ color: 'var(--text-muted)' }}>
-          {(moduleObj || typeObj) && (
+          {(productObj || moduleObj || typeObj) && (
             <>
               <button
-                onClick={typeObj ? onGoModule : onGoHome}
+                onClick={backHandler}
                 className="flex items-center gap-1.5 px-2 py-1 border transition-colors hover:opacity-80"
                 style={{ borderColor: 'var(--border)', color: 'var(--text-secondary)' }}
               >
@@ -525,8 +613,52 @@ function Header({ theme, toggleTheme, connected, moduleObj, typeObj, onGoHome, o
   );
 }
 
-// ─── Level 1: Modules landing ───────────────────────────────────
-function ModulesLanding({ runs, onSelect }) {
+// ─── Level 1: Products landing (UFM, Rule Center, etc.) ─────────
+function ProductsLanding({ onSelect }) {
+  // Products don't need per-product stats here since they may aggregate many modules.
+  // Just show the cards. Stats can be added later if needed.
+  return (
+    <div className="space-y-6">
+      <SectionHeader label="PRODUCTS" />
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {PRODUCTS.map(p => {
+          const Icon = p.icon;
+          return (
+            <button
+              key={p.id}
+              onClick={() => onSelect(p.id)}
+              className="text-left p-6 border transition-all hover:scale-[1.02] hover:shadow-lg group"
+              style={{ borderColor: 'var(--border)', background: 'var(--bg-panel)', borderRadius: '4px' }}
+            >
+              <div className="flex items-start justify-between mb-6">
+                <div
+                  className="p-3 inline-flex items-center justify-center transition-colors"
+                  style={{ background: hexToRgba(p.color, 0.1), color: p.color, borderRadius: '8px' }}
+                >
+                  <Icon size={26} strokeWidth={1.5} />
+                </div>
+                <ChevronRight
+                  size={16}
+                  className="opacity-30 group-hover:opacity-100 group-hover:translate-x-1 transition-all"
+                  style={{ color: 'var(--text-muted)' }}
+                />
+              </div>
+              <div className="font-mono text-base tracking-[0.15em] mb-1 uppercase" style={{ color: 'var(--text-primary)' }}>
+                {p.name}
+              </div>
+              <div className="text-[10px] font-mono tracking-wider" style={{ color: 'var(--text-muted)' }}>
+                {p.standalone ? 'STANDALONE PRODUCT' : `${p.moduleIds.length} MODULES`}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Level 2: Modules landing (filtered to a given product) ─────
+function ModulesLanding({ productObj, runs, onSelect }) {
   const statsByModule = useMemo(() => {
     const map = {};
     MODULES.forEach(m => {
@@ -535,28 +667,34 @@ function ModulesLanding({ runs, onSelect }) {
     return map;
   }, [runs]);
 
-  const ufmModules = MODULES.filter(m => m.group === 'UFM');
-  const standaloneModules = MODULES.filter(m => !m.group);
+  // Only show modules belonging to the selected product
+  const productModules = MODULES.filter(m => productObj.moduleIds.includes(m.id));
+
+  const ProductIcon = productObj.icon;
 
   return (
-    <div className="space-y-8">
-      <SectionHeader label="UFM" />
+    <div className="space-y-6">
+      {/* Product banner */}
+      <div className="flex items-center gap-4 p-5 border" style={{ borderColor: 'var(--border)', background: 'var(--bg-panel)' }}>
+        <div className="p-3" style={{ background: hexToRgba(productObj.color, 0.1), color: productObj.color, borderRadius: '8px' }}>
+          <ProductIcon size={28} strokeWidth={1.5} />
+        </div>
+        <div className="flex-1">
+          <div className="font-mono text-lg tracking-[0.15em] uppercase" style={{ color: 'var(--text-primary)' }}>
+            {productObj.name}
+          </div>
+          <div className="text-[10px] font-mono tracking-wider mt-1" style={{ color: 'var(--text-muted)' }}>
+            choose a module below
+          </div>
+        </div>
+      </div>
+
+      <SectionHeader label="MODULES" />
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        {ufmModules.map(mod => (
+        {productModules.map(mod => (
           <SelectionCard key={mod.id} item={mod} stats={statsByModule[mod.id]} onClick={() => onSelect(mod.id)} />
         ))}
       </div>
-
-      {standaloneModules.length > 0 && (
-        <>
-          <SectionHeader label="OTHER" />
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-            {standaloneModules.map(mod => (
-              <SelectionCard key={mod.id} item={mod} stats={statsByModule[mod.id]} onClick={() => onSelect(mod.id)} />
-            ))}
-          </div>
-        </>
-      )}
     </div>
   );
 }
