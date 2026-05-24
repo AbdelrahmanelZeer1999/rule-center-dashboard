@@ -9,18 +9,19 @@ import {
   Sun, Moon,
 } from 'lucide-react';
 
-// ─── Backend connection ─────────────────────────────────────────
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8080';
+// ─── Supabase connection ────────────────────────────────────────
+const SUPABASE_URL =
+  import.meta.env.VITE_SUPABASE_URL ||
+  'https://hakuokjtqygenmczrmdr.supabase.co';
 
-const api = {
-  list: () => fetch(`${API_BASE}/api/runs`).then(handleRes),
-  submit: (run) => fetch(`${API_BASE}/api/runs`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(run),
-  }).then(handleRes),
-  delete: (id) => fetch(`${API_BASE}/api/runs/${id}`, { method: 'DELETE' }).then(handleRes),
-  clear: () => fetch(`${API_BASE}/api/runs`, { method: 'DELETE' }).then(handleRes),
+const SUPABASE_KEY =
+  import.meta.env.VITE_SUPABASE_KEY ||
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imhha3Vva2p0cXlnZW5tY3pybWRyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2NDAxMDQsImV4cCI6MjA5NTIxNjEwNH0.lCyVwbdk9nuWzEEhvbld8y2htdO3TjWY2AUBc5ZPjak';
+
+const headers = {
+  apikey: SUPABASE_KEY,
+  Authorization: `Bearer ${SUPABASE_KEY}`,
+  'Content-Type': 'application/json',
 };
 
 async function handleRes(res) {
@@ -30,13 +31,95 @@ async function handleRes(res) {
     throw new Error(msg);
   }
   if (res.status === 204) return null;
-  return res.json();
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
 }
+
+const api = {
+  async list() {
+    const url = `${SUPABASE_URL}/rest/v1/test_runs?select=*,test_results(*)&order=timestamp.desc`;
+    const data = await handleRes(await fetch(url, { headers }));
+    return (data || []).map(run => ({
+      runId: run.run_id,
+      timestamp: run.timestamp,
+      suite: run.suite,
+      environment: run.environment,
+      tests: (run.test_results || []).map(t => ({
+        name: t.name,
+        endpoint: t.endpoint,
+        status: t.status,
+        duration: t.duration,
+        statusCode: t.status_code,
+        errorMessage: t.error_message,
+      })),
+    }));
+  },
+
+  async submit(run) {
+    const runId = run.runId || `run_${Date.now()}`;
+    const timestamp = run.timestamp || new Date().toISOString();
+
+    // 1. Insert the run row
+    await handleRes(await fetch(`${SUPABASE_URL}/rest/v1/test_runs`, {
+      method: 'POST',
+      headers: { ...headers, Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        run_id: runId,
+        suite: run.suite || 'Unnamed Suite',
+        environment: run.environment || 'unknown',
+        timestamp,
+      }),
+    }));
+
+    // 2. Insert the result rows (if any)
+    if (run.tests && run.tests.length > 0) {
+      const results = run.tests.map(t => ({
+        run_id: runId,
+        name: t.name,
+        endpoint: t.endpoint || null,
+        status: t.status,
+        duration: t.duration ?? 0,
+        status_code: t.statusCode ?? 0,
+        error_message: t.errorMessage || null,
+      }));
+      try {
+        await handleRes(await fetch(`${SUPABASE_URL}/rest/v1/test_results`, {
+          method: 'POST',
+          headers: { ...headers, Prefer: 'return=minimal' },
+          body: JSON.stringify(results),
+        }));
+      } catch (e) {
+        // Clean up orphan run
+        await fetch(`${SUPABASE_URL}/rest/v1/test_runs?run_id=eq.${encodeURIComponent(runId)}`, {
+          method: 'DELETE',
+          headers,
+        });
+        throw e;
+      }
+    }
+
+    return { runId, tests: run.tests || [] };
+  },
+
+  async delete(runId) {
+    await handleRes(await fetch(
+      `${SUPABASE_URL}/rest/v1/test_runs?run_id=eq.${encodeURIComponent(runId)}`,
+      { method: 'DELETE', headers }
+    ));
+  },
+
+  async clear() {
+    await handleRes(await fetch(
+      `${SUPABASE_URL}/rest/v1/test_runs?run_id=neq.__no_match__`,
+      { method: 'DELETE', headers }
+    ));
+  },
+};
 
 // ─── Sample seed data ───────────────────────────────────────────
 const SEED_RUNS = [
   {
-    runId: 'run_seed_001',
+    runId: `seed_${Date.now()}_1`,
     timestamp: new Date(Date.now() - 1000 * 60 * 60 * 3).toISOString(),
     suite: 'RuleEvaluationTests',
     environment: 'staging',
@@ -50,7 +133,7 @@ const SEED_RUNS = [
     ],
   },
   {
-    runId: 'run_seed_002',
+    runId: `seed_${Date.now()}_2`,
     timestamp: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
     suite: 'RuleEvaluationTests',
     environment: 'staging',
@@ -83,26 +166,11 @@ const SCHEMA_EXAMPLE = `{
   ]
 }`;
 
-const REST_ASSURED_SNIPPET = `// Send results from REST Assured (Java) to the dashboard
-import io.restassured.RestAssured;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
-@AfterSuite
-public void publishResults() throws Exception {
-    Map<String, Object> payload = new HashMap<>();
-    payload.put("runId", "run_" + System.currentTimeMillis());
-    payload.put("timestamp", Instant.now().toString());
-    payload.put("suite", "RuleEvaluationTests");
-    payload.put("environment", "staging");
-    payload.put("tests", collectedResults);
-
-    String json = new ObjectMapper().writeValueAsString(payload);
-
-    RestAssured.given()
-        .contentType("application/json")
-        .body(json)
-        .post("http://localhost:8080/api/runs");
-}`;
+const REST_ASSURED_SNIPPET = `// TestNG listener registered in testng.xml posts to Supabase
+// Configure via system properties:
+//   -Ddashboard.url=https://hakuokjtqygenmczrmdr.supabase.co
+//   -Ddashboard.key=<anon-key>
+//   -Ddashboard.env=staging`;
 
 // ─── Helpers ────────────────────────────────────────────────────
 const formatTime = (iso) => {
@@ -117,29 +185,16 @@ const formatTime = (iso) => {
   return `${days}d ago`;
 };
 
-// Theme-aware chart colors
 const getChartColors = (theme) => theme === 'light' ? {
-  pass: '#059669',
-  fail: '#dc2626',
-  skip: '#d97706',
-  gridStroke: '#e7e5e4',
-  axisStroke: '#a8a29e',
-  tooltipBg: '#ffffff',
-  tooltipBorder: '#d6d3d1',
-  tooltipText: '#1c1917',
-  hoverBar: 'rgba(0, 0, 0, 0.04)',
-  pieStroke: '#ffffff',
+  pass: '#059669', fail: '#dc2626', skip: '#d97706',
+  gridStroke: '#e7e5e4', axisStroke: '#a8a29e',
+  tooltipBg: '#ffffff', tooltipBorder: '#d6d3d1', tooltipText: '#1c1917',
+  hoverBar: 'rgba(0, 0, 0, 0.04)', pieStroke: '#ffffff',
 } : {
-  pass: '#00ff9d',
-  fail: '#ff4868',
-  skip: '#ffb648',
-  gridStroke: '#1a1a1a',
-  axisStroke: '#525252',
-  tooltipBg: '#0a0a0a',
-  tooltipBorder: '#262626',
-  tooltipText: '#e8e8e3',
-  hoverBar: 'rgba(255, 255, 255, 0.03)',
-  pieStroke: '#0a0a0a',
+  pass: '#00ff9d', fail: '#ff4868', skip: '#ffb648',
+  gridStroke: '#1a1a1a', axisStroke: '#525252',
+  tooltipBg: '#0a0a0a', tooltipBorder: '#262626', tooltipText: '#e8e8e3',
+  hoverBar: 'rgba(255, 255, 255, 0.03)', pieStroke: '#0a0a0a',
 };
 
 // ─── Sub-components ─────────────────────────────────────────────
@@ -151,10 +206,7 @@ const StatusBadge = ({ status }) => {
   };
   const s = styleMap[status] || styleMap.SKIP;
   return (
-    <span
-      className="inline-flex items-center gap-1.5 px-2 py-0.5 text-[10px] tracking-[0.15em] font-mono border"
-      style={s}
-    >
+    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 text-[10px] tracking-[0.15em] font-mono border" style={s}>
       <span className="inline-block w-1.5 h-1.5" style={{ backgroundColor: s.color }} />
       {status}
     </span>
@@ -187,7 +239,6 @@ export default function App() {
 
   const chartColors = useMemo(() => getChartColors(theme), [theme]);
 
-  // Persist theme
   useEffect(() => {
     try { localStorage.setItem('rc-theme', theme); } catch (e) {}
     document.body.setAttribute('data-theme', theme);
@@ -203,7 +254,7 @@ export default function App() {
       setGlobalError(null);
     } catch (e) {
       setConnected(false);
-      setGlobalError(`Cannot connect to backend at ${API_BASE} — ${e.message}`);
+      setGlobalError(`Cannot connect to Supabase — ${e.message}`);
     }
   }, []);
 
@@ -252,7 +303,6 @@ export default function App() {
     }
   };
 
-  // ─── Aggregate stats ─────────────────────────────────────────
   const stats = useMemo(() => {
     const allTests = runs.flatMap(r => r.tests || []);
     const pass = allTests.filter(t => t.status === 'PASS').length;
@@ -293,12 +343,11 @@ export default function App() {
     return allTestsFlat.filter(t => {
       if (filterStatus !== 'ALL' && t.status !== filterStatus) return false;
       if (searchQuery && !t.name.toLowerCase().includes(searchQuery.toLowerCase()) &&
-          !t.endpoint.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+          !(t.endpoint || '').toLowerCase().includes(searchQuery.toLowerCase())) return false;
       return true;
     });
   }, [allTestsFlat, filterStatus, searchQuery]);
 
-  // Color for pass-rate header chip
   const passRateColor = stats.rate >= 95 ? 'var(--accent)' : stats.rate >= 80 ? 'var(--warning)' : 'var(--danger)';
 
   return (
@@ -306,8 +355,6 @@ export default function App() {
       color: 'var(--text-primary)',
       backgroundImage: 'var(--bg-gradient)',
     }}>
-
-      {/* ─── Header ─── */}
       <header className="sticky top-0 z-20 border-b backdrop-blur" style={{
         borderColor: 'var(--border)',
         background: theme === 'light' ? 'rgba(250, 250, 249, 0.85)' : 'rgba(10, 10, 10, 0.8)',
@@ -381,12 +428,11 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto px-6 py-8">
         {connected === null ? (
-          <div className="text-center py-20 font-mono text-sm" style={{ color: 'var(--text-muted)' }}>connecting to backend...</div>
+          <div className="text-center py-20 font-mono text-sm" style={{ color: 'var(--text-muted)' }}>connecting to Supabase...</div>
         ) : runs.length === 0 && activeTab !== 'submit' && activeTab !== 'schema' ? (
           <EmptyState onLoadSeed={loadSeed} onSubmit={() => setActiveTab('submit')} connected={connected} />
         ) : (
           <>
-            {/* ─── DASHBOARD ─── */}
             {activeTab === 'dashboard' && (
               <div className="space-y-6">
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -504,7 +550,7 @@ export default function App() {
                                   <StatusBadge status={t.status} />
                                   <div className="flex-1 min-w-0">
                                     <div className="font-mono text-xs" style={{ color: 'var(--text-primary)' }}>{t.name}</div>
-                                    <div className="font-mono text-[10px] mt-1" style={{ color: 'var(--text-muted)' }}>{t.endpoint}</div>
+                                    <div className="font-mono text-[10px] mt-1" style={{ color: 'var(--text-muted)' }}>{t.endpoint || '—'}</div>
                                     {t.errorMessage && (
                                       <div className="mt-2 px-2 py-1.5 text-[10px] font-mono border-l-2"
                                         style={{ color: 'var(--danger)', background: 'var(--danger-bg)', borderColor: 'var(--danger)' }}>
@@ -528,7 +574,6 @@ export default function App() {
               </div>
             )}
 
-            {/* ─── TEST CASES ─── */}
             {activeTab === 'tests' && (
               <div className="space-y-4">
                 <div className="flex flex-wrap items-center gap-3">
@@ -585,7 +630,7 @@ export default function App() {
                           onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
                           <td className="px-4 py-3"><StatusBadge status={t.status} /></td>
                           <td className="px-4 py-3" style={{ color: 'var(--text-primary)' }}>{t.name}</td>
-                          <td className="px-4 py-3" style={{ color: 'var(--text-muted)' }}>{t.endpoint}</td>
+                          <td className="px-4 py-3" style={{ color: 'var(--text-muted)' }}>{t.endpoint || '—'}</td>
                           <td className="px-4 py-3 text-right tabular-nums" style={{ color: 'var(--text-secondary)' }}>{t.duration}ms</td>
                           <td className="px-4 py-3 text-right tabular-nums" style={{ color: 'var(--text-muted)' }}>{t.statusCode || '—'}</td>
                           <td className="px-4 py-3 text-right text-[10px]" style={{ color: 'var(--text-faint)' }}>{t.runId}</td>
@@ -601,7 +646,6 @@ export default function App() {
               </div>
             )}
 
-            {/* ─── SUBMIT ─── */}
             {activeTab === 'submit' && (
               <div className="space-y-4 max-w-4xl">
                 <div className="p-5 border" style={{ borderColor: 'var(--border)', background: 'var(--bg-panel)' }}>
@@ -610,32 +654,26 @@ export default function App() {
                     <span className="text-[10px] tracking-[0.2em] font-mono" style={{ color: 'var(--text-secondary)' }}>SUBMIT_RUN_RESULTS</span>
                   </div>
                   <p className="text-xs mb-4 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-                    Paste JSON below and POST it to the backend. This is the same endpoint your REST Assured suite hits at <code style={{ color: 'var(--accent)' }}>{API_BASE}/api/runs</code>.
+                    Paste JSON below. The dashboard inserts it directly into Supabase.
                   </p>
 
                   <textarea
                     value={jsonInput}
                     onChange={e => setJsonInput(e.target.value)}
                     className="w-full h-80 text-xs font-mono p-4 outline-none resize-y scrollbar border"
-                    style={{
-                      background: 'var(--bg-inset)',
-                      borderColor: 'var(--border)',
-                      color: 'var(--text-primary)',
-                    }}
+                    style={{ background: 'var(--bg-inset)', borderColor: 'var(--border)', color: 'var(--text-primary)' }}
                     onFocus={e => e.target.style.borderColor = 'var(--accent)'}
                     onBlur={e => e.target.style.borderColor = 'var(--border)'}
                     spellCheck={false}
                   />
 
                   {submitMessage && (
-                    <div
-                      className="mt-3 px-3 py-2 text-xs font-mono flex items-center gap-2 border"
+                    <div className="mt-3 px-3 py-2 text-xs font-mono flex items-center gap-2 border"
                       style={{
                         color: submitMessage.type === 'success' ? 'var(--accent)' : 'var(--danger)',
                         background: submitMessage.type === 'success' ? 'var(--accent-bg)' : 'var(--danger-bg)',
                         borderColor: submitMessage.type === 'success' ? 'var(--accent-border)' : 'var(--danger-border)',
-                      }}
-                    >
+                      }}>
                       {submitMessage.type === 'success' ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}
                       {submitMessage.text}
                     </div>
@@ -661,7 +699,6 @@ export default function App() {
               </div>
             )}
 
-            {/* ─── SCHEMA ─── */}
             {activeTab === 'schema' && (
               <div className="space-y-6 max-w-4xl">
                 <div className="p-5 border" style={{ borderColor: 'var(--border)', background: 'var(--bg-panel)' }}>
@@ -671,30 +708,6 @@ export default function App() {
                   </div>
                   <pre className="p-4 text-xs overflow-x-auto scrollbar border"
                     style={{ background: 'var(--bg-inset)', borderColor: 'var(--border)', color: 'var(--text-primary)' }}>{SCHEMA_EXAMPLE}</pre>
-
-                  <div className="mt-5 text-xs space-y-2">
-                    <div className="text-[10px] tracking-[0.2em] font-mono mb-2" style={{ color: 'var(--text-muted)' }}>FIELDS</div>
-                    {[
-                      ['runId', 'string', 'Unique identifier for this run. Auto-generated if omitted.'],
-                      ['timestamp', 'ISO 8601', 'When the run executed. Defaults to current time.'],
-                      ['suite', 'string', 'Name of the test suite/class.'],
-                      ['environment', 'string', 'staging, production, dev, etc.'],
-                      ['tests', 'array', 'Required. List of individual test results.'],
-                      ['tests[].name', 'string', 'Test method name.'],
-                      ['tests[].endpoint', 'string', 'HTTP method + path, e.g. "POST /api/rules".'],
-                      ['tests[].status', 'enum', 'One of: PASS, FAIL, SKIP.'],
-                      ['tests[].duration', 'number', 'Execution time in milliseconds.'],
-                      ['tests[].statusCode', 'number', 'HTTP response status code.'],
-                      ['tests[].errorMessage', 'string?', 'Optional. Failure reason if status is FAIL.'],
-                    ].map(([field, type, desc], idx, arr) => (
-                      <div key={field} className="grid grid-cols-12 gap-3 py-2"
-                        style={{ borderBottom: idx === arr.length - 1 ? 'none' : '1px solid var(--border)' }}>
-                        <code className="col-span-3 font-mono text-[11px]" style={{ color: 'var(--accent)' }}>{field}</code>
-                        <code className="col-span-2 font-mono text-[11px]" style={{ color: 'var(--text-muted)' }}>{type}</code>
-                        <span className="col-span-7 text-[11px]" style={{ color: 'var(--text-secondary)' }}>{desc}</span>
-                      </div>
-                    ))}
-                  </div>
                 </div>
 
                 <div className="p-5 border" style={{ borderColor: 'var(--border)', background: 'var(--bg-panel)' }}>
@@ -702,9 +715,6 @@ export default function App() {
                     <Terminal size={14} style={{ color: 'var(--accent)' }} />
                     <span className="text-[10px] tracking-[0.2em] font-mono" style={{ color: 'var(--text-secondary)' }}>REST_ASSURED_INTEGRATION</span>
                   </div>
-                  <p className="text-xs mb-3 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-                    Hook a method into your test suite's <code style={{ color: 'var(--accent)' }}>@AfterSuite</code> to ship results to the backend:
-                  </p>
                   <pre className="p-4 text-xs overflow-x-auto scrollbar border"
                     style={{ background: 'var(--bg-inset)', borderColor: 'var(--border)', color: 'var(--text-primary)' }}>{REST_ASSURED_SNIPPET}</pre>
                 </div>
@@ -718,7 +728,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-6 flex items-center justify-between text-[10px] font-mono tracking-wider"
           style={{ color: 'var(--text-faint)' }}>
           <span>RULE_CENTER © {new Date().getFullYear()}</span>
-          <span>v0.1.0 • API: {API_BASE}</span>
+          <span>v0.2.0 • powered by Supabase</span>
         </div>
       </footer>
     </div>
