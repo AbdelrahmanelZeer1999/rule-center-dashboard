@@ -1,0 +1,52 @@
+# Render Blueprint — defines all services for one-click deployment.
+# Render reads this file from the repo root and creates everything automatically.
+
+databases:
+  - name: rule-center-db
+    plan: free
+    databaseName: rulecenter
+    user: rulecenter
+
+services:
+  # ─── Backend: Spring Boot ────────────────────────────────────
+  - type: web
+    name: rule-center-backend
+    runtime: docker
+    plan: free
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: DB_DRIVER
+        value: org.postgresql.Driver
+      - key: DB_DIALECT
+        value: org.hibernate.dialect.PostgreSQLDialect
+      - key: DATABASE_URL
+        fromDatabase:
+          name: rule-center-db
+          property: connectionString
+      - key: DB_USERNAME
+        fromDatabase:
+          name: rule-center-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: rule-center-db
+          property: password
+      - key: CORS_ORIGINS
+        sync: false   # set manually after frontend is deployed
+
+  # ─── Frontend: Static site ──────────────────────────────────
+  - type: web
+    name: rule-center-frontend
+    runtime: static
+    plan: free
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    envVars:
+      - key: VITE_API_BASE
+        sync: false   # set manually after backend is deployed
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
